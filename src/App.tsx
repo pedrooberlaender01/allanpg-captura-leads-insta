@@ -2,6 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
+  supabase,
+  fetchPublicIP,
+  readUtmsFromQuery,
+  persistUtms,
+  loadPersistedUtms,
+  type LeadInsert,
+} from './lib/supabase';
+import {
   Clock,
   Users,
   Star,
@@ -145,6 +153,51 @@ export default function App() {
   const [cupos, setCupos] = useState(79);
   const [countdown, setCountdown] = useState(99); // 1:39 -> seconds
 
+  // Tracking — capturado no mount, mantido em ref pra disponibilizar no submit
+  const trackingRef = useRef<{
+    utm_source: string | null;
+    utm_medium: string | null;
+    utm_campaign: string | null;
+    utm_content: string | null;
+    utm_term: string | null;
+    referrer: string | null;
+    ip: string | null;
+    user_agent: string | null;
+  }>({
+    utm_source: null,
+    utm_medium: null,
+    utm_campaign: null,
+    utm_content: null,
+    utm_term: null,
+    referrer: null,
+    ip: null,
+    user_agent: null,
+  });
+
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // Captura tracking 1x no mount
+  useEffect(() => {
+    const queryUtms = readUtmsFromQuery();
+    const hasQueryUtms = Object.values(queryUtms).some((v) => v !== null);
+    if (hasQueryUtms) {
+      persistUtms(queryUtms);
+    }
+    const utms = hasQueryUtms ? queryUtms : loadPersistedUtms();
+
+    trackingRef.current = {
+      ...utms,
+      referrer: typeof document !== 'undefined' ? document.referrer || null : null,
+      ip: null,
+      user_agent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
+    };
+
+    fetchPublicIP().then((ip) => {
+      trackingRef.current.ip = ip;
+    });
+  }, []);
+
   // form state — hydrated from localStorage so refresh preserves user input
   const initial = useMemo(loadForm, []);
   const [nombre, setNombre] = useState(initial.nombre);
@@ -198,6 +251,71 @@ export default function App() {
   function goNext(target: Screen) {
     window.scrollTo({ top: 0, behavior: 'smooth' });
     navigate(PATH_BY_SCREEN[target]);
+  }
+
+  async function submitLead() {
+    setSubmitError(null);
+    setSubmitting(true);
+
+    const t = trackingRef.current;
+    const payload: LeadInsert = {
+      nome_completo: nombre.trim(),
+      cpf: dni.replace(/\D/g, ''),
+      data_nascimento: fecha,
+      estado: provincia,
+      cidade: cidade,
+      whatsapp: whatsapp.replace(/\D/g, ''),
+      email: email.trim(),
+      senha: pass || null,
+      aceite_termos: acepta,
+      aceite_at: acepta ? new Date().toISOString() : null,
+      menor_idade: isUnderage(fecha),
+      utm_source: t.utm_source,
+      utm_medium: t.utm_medium,
+      utm_campaign: t.utm_campaign,
+      utm_content: t.utm_content,
+      utm_term: t.utm_term,
+      referrer: t.referrer,
+      ip: t.ip,
+      user_agent: t.user_agent,
+    };
+
+    const { data, error } = await supabase
+      .from('leads')
+      .insert(payload)
+      .select('id')
+      .single();
+
+    if (error) {
+      setSubmitting(false);
+      if (error.code === '23505') {
+        // unique_violation — CPF já cadastrado
+        setSubmitError('Esse CPF já está cadastrado. Confere seus dados.');
+      } else {
+        setSubmitError('Algo deu errado. Tenta de novo em alguns segundos.');
+        console.error('[submitLead] insert error:', error);
+      }
+      return;
+    }
+
+    // Evento "registrou" (best effort, não bloqueia sucesso)
+    if (data?.id) {
+      supabase
+        .from('lead_events')
+        .insert({ lead_id: data.id, tipo: 'registrou' })
+        .then(({ error: evErr }) => {
+          if (evErr) console.warn('[submitLead] event insert failed:', evErr);
+        });
+    }
+
+    setSubmitting(false);
+    // Limpa form persistido — leva tempo / não bloqueia navegação
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+    goNext('success');
   }
 
   // Scroll to top on every navigation
@@ -374,9 +492,11 @@ export default function App() {
                     setShowPass={setShowPass}
                     showPass2={showPass2}
                     setShowPass2={setShowPass2}
-                    submitOk={submitOk}
+                    submitOk={submitOk && !submitting}
                     passOk={passOk}
-                    onSubmit={() => goNext('success')}
+                    submitting={submitting}
+                    submitError={submitError}
+                    onSubmit={submitLead}
                   />
                 )}
               </FormShell>
@@ -646,12 +766,14 @@ function FormStep4(props: {
   showPass: boolean; setShowPass: (v: boolean) => void;
   showPass2: boolean; setShowPass2: (v: boolean) => void;
   submitOk: boolean; passOk: boolean;
+  submitting: boolean;
+  submitError: string | null;
   onSubmit: () => void;
 }) {
   const {
     whatsapp, setWhatsapp, email, setEmail, pass, setPass, pass2, setPass2,
     acepta, setAcepta, showPass, setShowPass, showPass2, setShowPass2,
-    submitOk, passOk, onSubmit,
+    submitOk, passOk, submitting, submitError, onSubmit,
   } = props;
   return (
     <div className="space-y-6">
@@ -731,12 +853,27 @@ function FormStep4(props: {
           <span className="text-[#39FF14]">participar dos sorteios.</span>
         </span>
       </label>
+      {submitError && (
+        <div className="glass rounded-2xl p-4 border border-red-500/40 bg-red-500/5 flex items-start gap-3">
+          <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
+          <p className="text-xs font-bold text-red-300 leading-snug">{submitError}</p>
+        </div>
+      )}
       <button
         disabled={!submitOk}
         onClick={onSubmit}
         className="w-full py-5 bg-[#39FF14] text-black font-impact text-2xl rounded-2xl glow-green disabled:bg-white/10 disabled:text-white/30 disabled:shadow-none hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2 uppercase italic disabled:cursor-not-allowed"
       >
-        Participar <ArrowRight size={26} />
+        {submitting ? (
+          <>
+            <span className="inline-block w-5 h-5 rounded-full border-2 border-black/30 border-t-black animate-spin" />
+            Enviando...
+          </>
+        ) : (
+          <>
+            Participar <ArrowRight size={26} />
+          </>
+        )}
       </button>
     </div>
   );

@@ -11,6 +11,7 @@
     "deploy": "gh-pages -d dist"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.105.4",
     "framer-motion": "^11.11.17",
     "lucide-react": "^0.469.0",
     "playwright": "^1.59.1",
