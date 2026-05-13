@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Allan Cabral | Faça parte dos meus</title>
+    <script>
+      // SPA redirect for GitHub Pages
+      // Stores deep path in sessionStorage and sends user to base URL,
+      // where index.html will read it back and restore the route.
+      (function () {
+        var segmentCount = 1; // matches base path depth: /Allan-PG---Captura-Leads---Insta/
+        var l = window.location;
+        sessionStorage.redirect = l.href;
+        l.replace(
+          l.protocol +
+            '//' +
+            l.hostname +
+            (l.port ? ':' + l.port : '') +
+            l.pathname.split('/').slice(0, 1 + segmentCount).join('/') +
+            '/'
+        );
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>
